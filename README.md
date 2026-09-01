@@ -33,65 +33,64 @@ traffic for `denogenesis.com`:
 deno task start
 ```
 
-On the VPS, the whole runbook below (systemd service, first-time certificate,
-nginx config, webroot renewals, health checks) is automated by one idempotent
-script — re-run it any time after pulling new code or config:
+## Deploy
+
+The whole install is one idempotent script. It runs the test suite first and
+installs nothing if it fails, so a broken tree cannot reach the server:
 
 ```sh
-sudo ./deploy/setup-vps.sh
+sudo deploy/deploy.sh
 ```
 
-The manual steps it performs follow.
+Updating is `git pull && sudo deploy/deploy.sh --skip-certbot`. Flags:
+`--skip-verify` (redeploy an already-verified tree), `--skip-nginx` (proxy lives
+elsewhere; implies `--skip-certbot`), `--skip-certbot`, `--skip-fail2ban`,
+`--staging` (Let's Encrypt staging CA), `--force-renewal`. Every path and name
+is overridable from the environment — see `deploy/deploy.sh --help`.
 
-Install the systemd service on the VPS:
+Prerequisites: `deno` at `/usr/bin/deno` (a real file, not a `~/.deno` symlink —
+the unit's `ProtectHome=tmpfs` hides `/home`), `nginx`, `certbot`, and
+`fail2ban` installed; DNS A/AAAA records for `denogenesis.com` and
+`www.denogenesis.com` pointing at the VPS; ports 80/443 open.
+
+What it does, in order, each step idempotent:
+
+1. **Verify** — `deno task verify` (fmt, lint, type check, tests) as the
+   invoking user. Nothing is installed if it fails.
+2. **Account** — a `dgweb` system user with no shell, no home, no password.
+3. **Ownership** — the checkout becomes `<you>:dgweb`, group read-only, so the
+   running service cannot rewrite the code it executes. `data/` is re-asserted
+   `dgweb:<your-group>` (setgid `2770`) so the service can write the KV database
+   and you can still read it.
+4. **Environment** — `/etc/denogenesis/denogenesis.env` from the example, only
+   if absent (it is the one file meant to diverge from git).
+5. **Module cache** — `deno cache main.ts` into `/var/cache/denogenesis/deno`,
+   so the unit runs `--cached-only` and never contacts a registry at runtime.
+6. **Service** — `deploy/systemd/denogenesis.service` with its placeholder
+   paths/user rewritten for this host, then `daemon-reload` + `restart`. The
+   unit is a hardened sandbox (`ProtectSystem=strict`, `ProtectHome=tmpfs`,
+   `SystemCallFilter=@system-service`, empty `CapabilityBoundingSet`, bind
+   mounts for the checkout read-only and `data/` read-write).
+7. **Health** — polls `127.0.0.1:8004/healthz`, then does one real
+   `POST /api/waitlist` (idempotent per email) to prove the KV store is
+   writable. A failure prints the `chown` that fixes it.
+8. **Certificates** — webroot issuance via `certbot`, no downtime. On a host
+   with no lineage yet it writes a temporary plaintext challenge-only vhost,
+   issues, then step 9 replaces it. Installs a renewal deploy-hook that reloads
+   nginx and enables `certbot.timer`.
+9. **Reverse proxy** — installs `deny-probes.conf`, the box-wide
+   `00-default-drop` catch-all (which owns `ssl`/`http2` for `:443`; removes the
+   distro `default` site), and `denogenesis.com.conf`, then `nginx -t` and
+   reload.
+10. **fail2ban** — the repo's `nginx-probes` filter, plus `jail.local` only if
+    absent (it carries the real sshd port, which is not in git). Restarts
+    fail2ban and checks the jail is reading the access logs, not the journal.
 
 ```sh
-sudo cp deploy/systemd/denogenesis.service /etc/systemd/system/denogenesis.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now denogenesis.service
-sudo systemctl status denogenesis.service
+journalctl -u denogenesis -f
+sudo systemctl status denogenesis
+sudo fail2ban-client status nginx-probes
 ```
-
-Read service logs:
-
-```sh
-journalctl -u denogenesis.service -f
-```
-
-Install the reverse proxy. The shipped config terminates HTTPS, so a certificate
-must exist before `nginx -t` will pass. Prerequisites: DNS A/AAAA records for
-`denogenesis.com` and `www.denogenesis.com` pointing at the VPS, and ports
-80/443 open.
-
-1. Obtain the first certificate (brief downtime while certbot binds port 80):
-
-   ```sh
-   sudo mkdir -p /var/www/certbot
-   sudo systemctl stop nginx
-   sudo certbot certonly --standalone \
-     -d denogenesis.com -d www.denogenesis.com \
-     --agree-tos -m pedro.dfedro@gmail.com --no-eff-email
-   ```
-
-2. Deploy the scanner-probe snippet and proxy config, then start nginx:
-
-   ```sh
-   sudo cp deploy/nginx/snippets/deny-probes.conf /etc/nginx/snippets/deny-probes.conf
-   sudo cp deploy/nginx/denogenesis.com.conf /etc/nginx/sites-available/denogenesis.com
-   sudo ln -sf /etc/nginx/sites-available/denogenesis.com /etc/nginx/sites-enabled/denogenesis.com
-   sudo nginx -t
-   sudo systemctl start nginx
-   ```
-
-3. Switch renewals to the zero-downtime webroot method (the deployed config
-   serves `/.well-known/acme-challenge/` from `/var/www/certbot` over HTTP),
-   then confirm auto-renewal works:
-
-   ```sh
-   sudo certbot certonly --webroot -w /var/www/certbot \
-     -d denogenesis.com -d www.denogenesis.com
-   sudo certbot renew --dry-run
-   ```
 
 HTTP and `www.denogenesis.com` are 301-redirected to the canonical
 `https://denogenesis.com`, and the app emits `Strict-Transport-Security`
@@ -104,6 +103,7 @@ deno task check
 deno task fmt
 deno task lint
 deno task test
+deno task verify   # fmt --check, lint, check, test — the gate deploy.sh runs
 ```
 
 ## Security
@@ -130,8 +130,8 @@ The app follows OWASP secure-defaults for a static site:
 - Nginx adds `server_tokens off`, a request-body cap, per-IP rate limiting, and
   rejects non-`GET`/`HEAD` methods at the edge.
 - A shared `snippets/deny-probes.conf` (shipped in `deploy/nginx/snippets/`)
-  closes the connection (`444`) on PHP/WordPress/dotfile scanner probes in
-  every vhost, keeping them logged so fail2ban can ban the source IP.
+  closes the connection (`444`) on PHP/WordPress/dotfile scanner probes in every
+  vhost, keeping them logged so fail2ban can ban the source IP.
 - `POST` is permitted only on `/api/waitlist` (app) and a dedicated Nginx
   `location /api/` with a tighter rate limit and a `2k` body cap. Deno write
   access is scoped to the KV directory (`--allow-write=data`).
@@ -155,13 +155,23 @@ The server follows a small, composable shape:
   validated against a Zod schema (JSR `@zod/zod`) before it reaches the store.
 - `src/app.ts` assembles the health route, waitlist route, static file route,
   security headers, method guard, and request logging.
-- `deploy/systemd/denogenesis.service` runs the Deno app from
-  `/home/sysadmin/.local/src/development/dg-website` as the `sysadmin` user.
+- `deploy/systemd/denogenesis.service` runs the Deno app from the checkout as a
+  shell-less `dgweb` system account inside a strict systemd sandbox. It carries
+  placeholder paths for the machine it was written on; `deploy/deploy.sh`
+  rewrites `WorkingDirectory`, the bind mounts, and `User`/`Group` per host.
+- `deploy/systemd/denogenesis.env.example` is the template for the optional
+  `/etc/denogenesis/denogenesis.env` override file (never in git).
 - `deploy/nginx/denogenesis.com.conf` reverse proxies `denogenesis.com` to the
   Deno process at `127.0.0.1:8004`, gzips text responses at the edge, and
-  301-redirects HTTP and `www.denogenesis.com` to the canonical HTTPS apex.
-- `deploy/setup-vps.sh` applies all of the above on the VPS in one idempotent
-  run (service, certificate, nginx config, health checks).
+  301-redirects HTTP and `www.denogenesis.com` to the canonical HTTPS apex. Its
+  `listen 443;` lines are bare — `ssl`/`http2` are set once in
+  `deploy/nginx/00-default-drop`, the box-wide catch-all that also closes the
+  connection on requests to no known `server_name`.
+- `deploy/fail2ban/` holds the `nginx-probes` filter and a `jail.local` template
+  that bans the IPs behind scanner probes.
+- `deploy/deploy.sh` applies all of the above on the VPS in one idempotent run,
+  test-gated, with privilege separation, a no-downtime ACME bootstrap, and
+  `--skip-*` flags. See the Deploy section above.
 
 Public routes:
 

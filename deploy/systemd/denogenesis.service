@@ -1,29 +1,126 @@
+# /etc/systemd/system/denogenesis.service
+#
+# The application runs from the checkout — there is no copy under /srv to drift
+# out of step with git: `git pull` and a restart is the whole update, and
+# `systemctl cat denogenesis` names the directory you edit.
+#
+# It does not run *as* the user who owns that checkout. The owner keeps write
+# access so `git pull` works without sudo; the service account gets group read
+# and nothing else, so a bug in the request path cannot rewrite the code that
+# will be executed at the next restart. Two users, one directory:
+#
+#   drwxr-x---  <owner>:dgweb    the checkout  (owner writes, service reads)
+#   drwxrws---  dgweb:<owner>    data/         (both write; the KV database and
+#                                               its -wal/-shm files live here)
+#
+# The Deno permission flags and the systemd sandbox say the same thing twice,
+# from two directions: Deno refuses what the process asks for, and the kernel
+# refuses what the process could reach anyway.
+#
+#   sudo install -o root -g root -m 0644 deploy/systemd/denogenesis.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now denogenesis
+#
+# WorkingDirectory, ConditionPathExists, BindReadOnlyPaths, BindPaths, User and
+# Group all name the checkout or its accounts. deploy/deploy.sh rewrites them
+# for the host it runs on; edit them by hand only if you install this file
+# yourself.
+
 [Unit]
-Description=DenoGenesis Deno web app
+Description=denogenesis.com — DenoGenesis Deno web application
 Documentation=https://denogenesis.com
-Wants=network-online.target
+ConditionPathExists=/home/sysadmin/.local/src/development/dg-website/main.ts
 After=network-online.target
+Wants=network-online.target
 
 [Service]
-Type=simple
-User=sysadmin
-Group=sysadmin
+Type=exec
+User=dgweb
+Group=dgweb
 WorkingDirectory=/home/sysadmin/.local/src/development/dg-website
-Environment=HOME=/home/sysadmin
-Environment=DENO_DIR=/home/sysadmin/.cache/deno
-Environment=PATH=/home/sysadmin/.deno/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
 Environment=HOST=127.0.0.1
 Environment=PORT=8004
-ExecStart=/usr/bin/env deno task start
+Environment=KV_PATH=data/waitlist.db
+Environment=DENO_DIR=/var/cache/denogenesis/deno
+
+# Secrets and per-host overrides, none of them in git. The leading `-` makes
+# the file optional: the defaults above stand on their own.
+EnvironmentFile=-/etc/denogenesis/denogenesis.env
+
+# Exactly the capabilities the application uses, and no others. Read access is
+# the served directory and the KV directory; write access is the KV directory;
+# the network is one loopback interface it can never leave.
+#
+# --unstable-kv is required for Deno.openKv, which holds the waitlist. The
+# database is a file inside data/, so it needs no permission the service did
+# not already have — but without this flag the process exits at startup.
+ExecStart=/usr/bin/deno run \
+  --unstable-kv \
+  --allow-net=127.0.0.1 \
+  --allow-read=public,data \
+  --allow-write=data \
+  --allow-env=HOST,PORT,KV_PATH \
+  --cached-only \
+  main.ts
+
 Restart=on-failure
-RestartSec=5s
+RestartSec=2s
 KillSignal=SIGINT
 TimeoutStopSec=20s
+
+# --- sandbox -----------------------------------------------------------------
+# strict mounts the entire hierarchy read-only — including the checkout, which
+# is the point — and the two Bind lines below carve out the exceptions.
+# ProtectHome=tmpfs replaces /home with an empty tmpfs, so no other user's home
+# directory exists as far as this process is concerned; the bind mounts are
+# applied afterwards and put back exactly one directory. If a systemd too old
+# to order those correctly ever refuses to start the unit, ProtectHome=read-only
+# is the fallback: it keeps the write protection and gives up only the hiding.
 NoNewPrivileges=true
 PrivateTmp=true
-ProtectSystem=full
-ProtectHome=read-only
-ReadWritePaths=/home/sysadmin/.cache/deno /home/sysadmin/.local/src/development/dg-website
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=tmpfs
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+LockPersonality=true
+MemoryDenyWriteExecute=false
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0027
+
+# The module cache, resolved once at deploy time so --cached-only can hold.
+# CacheDirectory= is what makes /var/cache/denogenesis writable under strict.
+CacheDirectory=denogenesis
+
+# The checkout, read-only — the process can execute this code and never alter
+# it — and then the one directory it must write: the KV database. Order
+# matters, the read-write bind lands on top of the read-only one.
+BindReadOnlyPaths=/home/sysadmin/.local/src/development/dg-website
+BindPaths=/home/sysadmin/.local/src/development/dg-website/data
+
+# --- limits ----------------------------------------------------------------
+LimitNOFILE=8192
+MemoryMax=256M
+TasksMax=64
+
+# journald captures the request log on stdout; no log files, no rotation.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=denogenesis
 
 [Install]
 WantedBy=multi-user.target

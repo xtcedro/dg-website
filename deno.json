@@ -5,7 +5,8 @@
     "fmt": "deno fmt",
     "lint": "deno lint",
     "start": "deno run --allow-net --allow-read=public,data --allow-write=data --allow-env=HOST,PORT,KV_PATH main.ts",
-    "test": "deno test"
+    "test": "deno test",
+    "verify": "deno fmt --check && deno lint && deno check main.ts && deno test"
   },
   "unstable": ["kv"],
   "fmt": {

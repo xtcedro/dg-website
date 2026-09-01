@@ -1,0 +1,36 @@
+# Deploy to /etc/fail2ban/jail.local, then restart (NOT just enable --now —
+# apt install starts fail2ban before this file exists, so it must be
+# restarted to load it):
+#   sudo systemctl restart fail2ban
+#   sudo fail2ban-client status nginx-probes
+#
+# `backend = polling` is required for the nginx jail: the distro default can
+# resolve to the systemd-journal backend, and nginx access logs never reach
+# the journal — the jail would sit at 0 matches forever. The status output
+# must say "File list:", not "Journal matches:".
+#
+# One file for the whole box. It is shared with every other site deployed
+# here, so it is installed only when absent: deploy/deploy.sh will not
+# overwrite a jail.local that has been edited on the server (the sshd port
+# below is exactly such an edit).
+#
+# Bans apply to ports 80/443 only (not SSH). Unban an IP with:
+#   sudo fail2ban-client set nginx-probes unbanip <ip>
+[DEFAULT]
+bantime  = 24h
+findtime = 10m
+
+[sshd]
+enabled = true
+# The server runs sshd on a nonstandard port. The stock jail bans `port = ssh`
+# (22), which would ban the wrong port — on the server, add here:
+#   port = <actual sshd port>
+# (deliberately not committed; check `sudo sshd -T | grep -i '^port'`)
+
+[nginx-probes]
+enabled  = true
+backend  = polling
+port     = http,https
+filter   = nginx-probes
+logpath  = /var/log/nginx/*access.log
+maxretry = 3

@@ -1,0 +1,39 @@
+# Catch-all default server. Deploy to /etc/nginx/sites-available/00-default-drop
+# and symlink into sites-enabled (remove the distro "default" site first):
+#   sudo rm -f /etc/nginx/sites-enabled/default
+#   sudo ln -sf /etc/nginx/sites-available/00-default-drop /etc/nginx/sites-enabled/00-default-drop
+#
+# Requests that match no configured server_name (bare-IP scans, fake Host
+# headers) get the connection closed with no response at all. Every real
+# site on this box has its own server_name vhost, so none of them are
+# affected.
+#
+# One file for the whole box, not one per site: install it once, and every
+# application deployed here inherits it.
+#
+# This file also owns the protocol options for the two sockets. `ssl` and
+# `http2` on a `listen` are properties of the address:port, not of the server
+# block, and nginx accepts them from whichever server block it parses first —
+# which, with the `00-` prefix sorting it to the head of sites-enabled, is
+# always this one. Every other vhost on the box therefore writes a bare
+# `listen 443;` and inherits SSL and HTTP/2 from here. Repeating `ssl` in them
+# would only earn a "protocol options redefined" warning.
+#
+# ssl_reject_handshake requires nginx >= 1.19.4. On older nginx, replace it
+# with the ssl_certificate/ssl_certificate_key lines from any Certbot vhost
+# plus `return 444;`.
+#
+# `http2` as a listen parameter is the portable spelling. nginx >= 1.25.1
+# deprecates it in favour of a standalone `http2 on;` directive in this same
+# server block; both enable it for the whole socket.
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    return 444;
+}
+
+server {
+    listen 443 ssl http2 default_server;
+    listen [::]:443 ssl http2 default_server;
+    ssl_reject_handshake on;
+}

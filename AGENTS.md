@@ -29,8 +29,13 @@ This repository is a Deno web app for the DenoGenesis teaser site.
   by an explicit `@std/path` traversal check (`isPathWithinRoot`).
 - `src/waitlist.ts` holds the Deno KV waitlist store and its HTTP handlers.
 - `src/app.ts` assembles the app from the small functions above.
-- `deploy/nginx/denogenesis.com.conf` contains the production reverse proxy.
-- `deploy/systemd/denogenesis.service` contains the production systemd service.
+- `deploy/nginx/denogenesis.com.conf` contains the production reverse proxy;
+  `deploy/nginx/00-default-drop` is the box-wide catch-all it depends on.
+- `deploy/systemd/denogenesis.service` is the production unit (hardened sandbox,
+  runs as the `dgweb` system account); `deploy/systemd/denogenesis.env.example`
+  is the `/etc/denogenesis/denogenesis.env` template.
+- `deploy/deploy.sh` installs all of it on the VPS in one idempotent, test-gated
+  run; `deploy/fail2ban/` holds its `nginx-probes` filter and `jail.local`.
 
 Keep additions small, explicit, and composable. Prefer one function that does
 one job over shared state or hidden framework behavior.
@@ -79,3 +84,4 @@ one job over shared state or hidden framework behavior.
 - Develop: `deno task dev`
 - Start: `deno task start`
 - Test: `deno task test`
+- Verify: `deno task verify` (the gate `deploy/deploy.sh` runs)
